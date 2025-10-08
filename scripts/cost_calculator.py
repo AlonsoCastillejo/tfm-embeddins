@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""
+Calculadora de Costos de Embeddings OpenAI
+==========================================
+
+Analiza un archivo CSV y calcula el costo estimado de generar embeddings
+para todos los registros usando la API de OpenAI.
+
+Uso:
+    python scripts/cost_calculator.py data/pisos_example.csv
+    python scripts/cost_calculator.py data/pisos_final_capitales.csv --model large
+"""
+
+import sys
+import os
+import pandas as pd
+import argparse
+from typing import Dict, List, Tuple
+
+# Añadir src al path para imports
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+from data_processor import DataProcessor
+
+class EmbeddingCostCalculator:
+    """Calculadora de costos para embeddings OpenAI"""
+
+    # Precios oficiales OpenAI (por 1M tokens) - Septiembre 2025
+    EMBEDDING_PRICES = {
+        'text-embedding-3-small': 0.02,    # $0.02 por 1M tokens
+        'text-embedding-3-large': 0.13,    # $0.13 por 1M tokens
+        'text-embedding-ada-002': 0.10     # $0.10 por 1M tokens (legacy)
+    }
+
+    # Dimensiones de los embeddings
+    EMBEDDING_DIMENSIONS = {
+        'text-embedding-3-small': 1536,
+        'text-embedding-3-large': 3072,
+        'text-embedding-ada-002': 1536
+    }
+
+    def __init__(self):
+        self.analysis_results = {}
+
+    def analyze_csv(self, csv_path: str) -> Dict:
+        """Analiza el CSV y calcula estadísticas de texto"""
+        print(f" Analizando archivo: {csv_path}")
+        print("=" * 60)
+
+        # Cargar datos
+        try:
+            df = pd.read_csv(csv_path)
+            print(f" Archivo cargado: {len(df)} registros")
+        except Exception as e:
+            print(f" Error cargando archivo: {e}")
+            return {}
+
+        # Limpiar datos usando nuestro procesador
+        df_clean = DataProcessor.clean_dataframe(df)
+        print(f" Datos limpios: {len(df_clean)} registros válidos")
+        print(f" Registros eliminados: {len(df) - len(df_clean)}")
+
+        # Generar textos descriptivos como lo hace el sistema real
+        print("\n Generando textos descriptivos...")
+        descriptive_texts = df_clean.apply(DataProcessor.build_descriptive_text, axis=1).tolist()
+
+        # Analizar estadísticas de texto
+        text_stats = self._analyze_text_statistics(descriptive_texts)
+
+        # Mostrar muestra de texto
+        print(f"\n Ejemplo de texto a procesar:")
+        print("-" * 40)
+        sample_text = descriptive_texts[0] if descriptive_texts else "N/A"
+        print(f"{sample_text[:300]}...")
+        print("-" * 40)
+
+        self.analysis_results = {
+            'csv_path': csv_path,
+            'total_records': len(df),
+            'valid_records': len(df_clean),
+            'removed_records': len(df) - len(df_clean),
+            'descriptive_texts': descriptive_texts,
+            'text_stats': text_stats
+        }
+
+        return self.analysis_results
+
+    def _analyze_text_statistics(self, texts: List[str]) -> Dict:
+        """Analiza estadísticas de los textos descriptivos"""
+        if not texts:
+            return {}
+
+        # Calcular estadísticas básicas
+        text_lengths = [len(text) for text in texts]
+        word_counts = [len(text.split()) for text in texts]
+
+        # Estimación de tokens (aproximadamente 1 token = 4 caracteres para español)
+        # Esta es una estimación conservadora - OpenAI usa tokenización más precisa
+        estimated_tokens = [len(text) // 3.5 for text in texts]  # Español usa más tokens que inglés
+
+        stats = {
+            'total_texts': len(texts),
+            'total_characters': sum(text_lengths),
+            'total_words': sum(word_counts),
+            'estimated_total_tokens': int(sum(estimated_tokens)),
+            'avg_characters': sum(text_lengths) / len(texts),
+            'avg_words': sum(word_counts) / len(texts),
+            'avg_tokens': sum(estimated_tokens) / len(texts),
+            'min_characters': min(text_lengths),
+            'max_characters': max(text_lengths),
+            'min_tokens': min(estimated_tokens),
+            'max_tokens': max(estimated_tokens)
+        }
+
+        return stats
+
+    def calculate_costs(self, model_name: str = 'text-embedding-3-large') -> Dict:
+        """Calcula costos para diferentes modelos"""
+        if not self.analysis_results:
+            return {}
+
+        text_stats = self.analysis_results['text_stats']
+        estimated_tokens = text_stats['estimated_total_tokens']
+
+        # Calcular costos para todos los modelos
+        costs = {}
+        for model, price_per_million in self.EMBEDDING_PRICES.items():
+            cost = (estimated_tokens / 1_000_000) * price_per_million
+            costs[model] = {
+                'estimated_tokens': estimated_tokens,
+                'price_per_million': price_per_million,
+                'total_cost_usd': cost,
+                'total_cost_eur': cost * 0.85,  # Conversión aproximada USD -> EUR
+                'dimensions': self.EMBEDDING_DIMENSIONS[model]
+            }
+
+        return costs
+
+    def print_detailed_analysis(self):
+        """Imprime análisis detallado de costos"""
+        if not self.analysis_results:
+            print(" No hay datos analizados")
+            return
+
+        results = self.analysis_results
+        text_stats = results['text_stats']
+
+        print(f"\n ANÁLISIS DETALLADO DEL DATASET")
+        print("=" * 60)
+
+        # Estadísticas del dataset
+        print(f"📁 Archivo: {results['csv_path']}")
+        print(f"📈 Registros totales: {results['total_records']:,}")
+        print(f" Registros válidos: {results['valid_records']:,}")
+        print(f" Registros eliminados: {results['removed_records']:,}")
+        print(f" Tasa de validez: {(results['valid_records']/results['total_records']*100):.1f}%")
+
+        # Estadísticas de texto
+        print(f"\n ESTADÍSTICAS DE TEXTO")
+        print("-" * 30)
+        print(f" Total caracteres: {text_stats['total_characters']:,}")
+        print(f" Total palabras: {text_stats['total_words']:,}")
+        print(f" Tokens estimados: {text_stats['estimated_total_tokens']:,}")
+        print(f" Promedio caracteres/texto: {text_stats['avg_characters']:.0f}")
+        print(f" Promedio palabras/texto: {text_stats['avg_words']:.0f}")
+        print(f" Promedio tokens/texto: {text_stats['avg_tokens']:.0f}")
+        print(f"📐 Rango tokens: {text_stats['min_tokens']:.0f} - {text_stats['max_tokens']:.0f}")
+
+        # Cálculo de costos
+        costs = self.calculate_costs()
+
+        print(f"\n ESTIMACIÓN DE COSTOS EMBEDDINGS")
+        print("=" * 60)
+
+        for model, cost_info in costs.items():
+            print(f"\n {model}")
+            print(f"    Dimensiones: {cost_info['dimensions']}")
+            print(f"    Tokens estimados: {cost_info['estimated_tokens']:,}")
+            print(f"    Precio por 1M tokens: ${cost_info['price_per_million']}")
+            print(f"    Costo total: ${cost_info['total_cost_usd']:.4f} USD")
+            print(f"    Costo total: €{cost_info['total_cost_eur']:.4f} EUR")
+
+            # Categorización de costo
+            cost_category = self._categorize_cost(cost_info['total_cost_usd'])
+            print(f"    Categoría: {cost_category}")
+
+    def _categorize_cost(self, cost_usd: float) -> str:
+        """Categoriza el costo para dar contexto"""
+        if cost_usd < 0.01:
+            return " Muy Barato (< $0.01)"
+        elif cost_usd < 0.10:
+            return " Barato (< $0.10)"
+        elif cost_usd < 1.00:
+            return " Moderado (< $1.00)"
+        elif cost_usd < 10.00:
+            return " Caro (< $10.00)"
+        else:
+            return " Muy Caro (> $10.00)"
+
+    def compare_models(self):
+        """Compara todos los modelos lado a lado"""
+        costs = self.calculate_costs()
+
+        print(f"\n COMPARACIÓN DE MODELOS")
+        print("=" * 80)
+        print(f"{'Modelo':<25} {'Dimensiones':<12} {'Costo USD':<12} {'Costo EUR':<12} {'Calidad'}")
+        print("-" * 80)
+
+        # Ordenar por costo
+        sorted_models = sorted(costs.items(), key=lambda x: x[1]['total_cost_usd'])
+
+        for model, info in sorted_models:
+            quality = self._get_quality_rating(model)
+            print(f"{model:<25} {info['dimensions']:<12} ${info['total_cost_usd']:<11.4f} "
+                  f"€{info['total_cost_eur']:<11.4f} {quality}")
+
+    def _get_quality_rating(self, model: str) -> str:
+        """Devuelve rating de calidad para cada modelo"""
+        quality_map = {
+            'text-embedding-3-small': "",
+            'text-embedding-3-large': "",
+            'text-embedding-ada-002': ""
+        }
+        return quality_map.get(model, "")
+
+    def save_cost_report(self, output_path: str = None):
+        """Guarda reporte detallado en archivo"""
+        if not output_path:
+            csv_name = os.path.basename(self.analysis_results['csv_path']).replace('.csv', '')
+            output_path = f"cost_report_{csv_name}.txt"
+
+        costs = self.calculate_costs()
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write("REPORTE DE COSTOS EMBEDDINGS OPENAI\n")
+            f.write("=" * 50 + "\n\n")
+
+            f.write(f"Archivo analizado: {self.analysis_results['csv_path']}\n")
+            f.write(f"Registros válidos: {self.analysis_results['valid_records']:,}\n")
+            f.write(f"Tokens estimados: {self.analysis_results['text_stats']['estimated_total_tokens']:,}\n\n")
+
+            f.write("COSTOS POR MODELO:\n")
+            f.write("-" * 30 + "\n")
+
+            for model, info in costs.items():
+                f.write(f"{model}:\n")
+                f.write(f"  - Costo: ${info['total_cost_usd']:.4f} USD / €{info['total_cost_eur']:.4f} EUR\n")
+                f.write(f"  - Dimensiones: {info['dimensions']}\n\n")
+
+        print(f" Reporte guardado en: {output_path}")
+
+def main():
+    """Función principal"""
+    parser = argparse.ArgumentParser(description="Calculadora de costos embeddings OpenAI")
+    parser.add_argument("csv_file", help="Archivo CSV a analizar")
+    parser.add_argument("--model", default="text-embedding-3-large",
+                       choices=['text-embedding-3-small', 'text-embedding-3-large', 'text-embedding-ada-002'],
+                       help="Modelo principal para análisis detallado")
+    parser.add_argument("--save-report", action="store_true", help="Guardar reporte en archivo")
+
+    args = parser.parse_args()
+
+    # Verificar que el archivo existe
+    if not os.path.exists(args.csv_file):
+        print(f" Error: Archivo no encontrado: {args.csv_file}")
+        return
+
+    # Crear calculadora y analizar
+    calculator = EmbeddingCostCalculator()
+
+    # Analizar archivo
+    results = calculator.analyze_csv(args.csv_file)
+    if not results:
+        return
+
+    # Mostrar análisis detallado
+    calculator.print_detailed_analysis()
+
+    # Comparar modelos
+    calculator.compare_models()
+
+    # Recomendaciones
+    costs = calculator.calculate_costs()
+    best_value = min(costs.items(), key=lambda x: x[1]['total_cost_usd'] / x[1]['dimensions'])
+    best_quality = max(costs.items(), key=lambda x: x[1]['dimensions'])
+
+    print(f"\n RECOMENDACIONES")
+    print("=" * 30)
+    print(f" Mejor relación calidad/precio: {best_value[0]}")
+    print(f" Máxima calidad: {best_quality[0]}")
+    print(f"🏃 Para pruebas rápidas: text-embedding-3-small")
+    print(f"🚀 Para producción: text-embedding-3-large")
+
+    # Guardar reporte si se solicita
+    if args.save_report:
+        calculator.save_cost_report()
+
+if __name__ == "__main__":
+    main()
